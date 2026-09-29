@@ -1,0 +1,10 @@
+{
+  "name": "拾词 · 科学复习",
+  "short_name": "拾词",
+  "description": "支持默写、间隔复习、自动补全音标与释义的个人单词本",
+  "start_url": "./背单词.html",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#4f6ef7",
+  "lang": "zh-CN"
+}
