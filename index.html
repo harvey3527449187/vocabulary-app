@@ -683,23 +683,92 @@
     for(var k=0;k<keys.length;k++){ var b=deepFind(obj[keys[k]],names,depth+1); if(b) return b; }
     return "";
   }
+  function normalizePos(pos){
+    pos=(pos||"").toLowerCase().replace(/\s+/g,"");
+    var map={n:"n.",noun:"n.",v:"v.",verb:"v.",vt:"v.",vi:"v.",adj:"adj.",adjective:"adj.",adv:"adv.",adverb:"adv.",pronoun:"pron.",preposition:"prep.",conjunction:"conj.",interjection:"int.",exclamation:"int.",determiner:"det.",numeral:"num."};
+    return map[pos.replace(/\.$/,"")] || (pos ? pos.replace(/\.*$/,".") : "");
+  }
+  function cleanSenseText(text){
+    return (text||"").replace(/^[-•·\s]+/,"").replace(/\s+/g," ").trim();
+  }
+  function translationSeed(text){
+    text=cleanSenseText(text).split(/[;；]/)[0];
+    var colon=text.search(/[:：]/); if(colon>3) text=text.slice(0,colon);
+    var sentence=text.search(/[.!?。！？]/); if(sentence>8) text=text.slice(0,sentence);
+    return text.length>90?text.slice(0,90):text;
+  }
+  function conciseSense(text){
+    text=cleanSenseText(text).replace(/[;；。,.，]+$/g,"");
+    var colon=text.search(/[:：]/); if(colon>1&&colon<=18) text=text.slice(0,colon);
+    if(text.length>22){
+      var cut=text.search(/[，；。]/); if(cut>=4&&cut<=22) text=text.slice(0,cut);
+    }
+    return text.length>28?text.slice(0,28)+"…":text;
+  }
+  function senseFromText(text, fallbackPos){
+    text=cleanSenseText(text); if(!text) return null;
+    var m=text.match(/^(n|noun|v|verb|vt|vi|adj|adjective|adv|adverb|pron|pronoun|prep|preposition|conj|conjunction|int|interjection|det|determiner|num|numeral)\.?\s*[:：]?\s*(.+)$/i);
+    return {pos:normalizePos(m?m[1]:fallbackPos),text:cleanSenseText(m?m[2]:text)};
+  }
+  function collectChinaSenses(obj,depth,out){
+    if(!obj||depth>8) return out;
+    if(Array.isArray(obj)){ obj.forEach(function(v){ collectChinaSenses(v,depth+1,out); }); return out; }
+    if(typeof obj!=="object") return out;
+    Object.keys(obj).forEach(function(k){
+      var v=obj[k], isMeaning=/^(explains?|translations?|meanings?|means?)$/i.test(k);
+      if(isMeaning){
+        (Array.isArray(v)?v:[v]).forEach(function(x){
+          if(typeof x==="string"){ var s=senseFromText(x,""); if(s&&s.text) out.push(s); }
+        });
+      } else if(typeof v==="object") collectChinaSenses(v,depth+1,out);
+    });
+    return out;
+  }
+  function distinctEnough(a,b){
+    var aw=cleanSenseText(a).toLowerCase().split(/[^a-z\u4e00-\u9fff]+/).filter(function(x){return x.length>1;});
+    var bw=cleanSenseText(b).toLowerCase().split(/[^a-z\u4e00-\u9fff]+/).filter(function(x){return x.length>1;});
+    if(!aw.length||!bw.length) return a!==b;
+    var same=aw.filter(function(x){return bw.indexOf(x)>=0;}).length;
+    return same/Math.min(aw.length,bw.length)<0.65;
+  }
+  function selectSenses(senses,limit){
+    limit=limit||3; var clean=[], seen={};
+    (senses||[]).forEach(function(s){
+      if(!s) return; var item={pos:normalizePos(s.pos),text:cleanSenseText(s.text||s.english)};
+      var id=item.pos+"|"+item.text.toLowerCase();
+      if(item.text&&!seen[id]){seen[id]=1;clean.push(item);}
+    });
+    var chosen=[], usedPos={};
+    clean.forEach(function(s){ if(chosen.length<limit&&!usedPos[s.pos||"?"]){chosen.push(s);usedPos[s.pos||"?"]=1;} });
+    clean.forEach(function(s){
+      if(chosen.length>=limit||chosen.indexOf(s)>=0) return;
+      var peers=chosen.filter(function(x){return x.pos===s.pos;});
+      if(!peers.length||peers.every(function(x){return distinctEnough(x.text,s.text);})) chosen.push(s);
+    });
+    return chosen.slice(0,limit);
+  }
+  function sensesToDef(senses){
+    return selectSenses(senses,3).map(function(s){return (s.pos?s.pos+" ":"")+conciseSense(s.text);}).join("｜");
+  }
   function lookupChina(key){
     var url="https://apii.xianyuw.cn/api/v1/youdao-translate?text="+encodeURIComponent(key)+"&from=en&to=zh-CHS";
     return fetchJSON(url,6500).then(function(data){
       var root=data&&data.data, zh=root&&root.result;
       if(!root || !zh || zh.toLowerCase()===key.toLowerCase()) throw new Error("no chinese result");
       var ph=deepFind(root.detail||root,["phonetic","ukphone","usphone","phone","pronunciation"],0);
-      return {zh:zh,phonetic:cleanPhonetic(ph),source:"youdao-mirror"};
+      var senses=selectSenses(collectChinaSenses(root.detail||root,0,[]),3);
+      return {zh:zh,senses:senses,phonetic:cleanPhonetic(ph),source:"youdao-mirror"};
     });
   }
   function lookupDatamuse(key){
     var url="https://api.datamuse.com/words?sp="+encodeURIComponent(key)+"&qe=sp&md=dpr&ipa=1&max=1";
     return fetchJSON(url,6500).then(function(data){
       var item=data&&data[0]; if(!item || (item.word||"").toLowerCase()!==key.toLowerCase()) throw new Error("not found");
-      var tags=item.tags||[], ph="", pos="", english="";
+      var tags=item.tags||[], ph="", pos="", english="", senses=[];
       tags.forEach(function(t){ if(t.indexOf("pron:")===0) ph=t.slice(5); else if(!pos && /^(n|v|adj|adv)$/.test(t)) pos=t+"."; });
-      if(item.defs&&item.defs[0]){ var parts=item.defs[0].split("\t"); if(!pos&&parts.length>1) pos=parts[0]+"."; english=parts.length>1?parts.slice(1).join(" "):parts[0]; }
-      return {phonetic:cleanPhonetic(ph),english:english,pos:pos,source:"datamuse"};
+      (item.defs||[]).forEach(function(d){ var parts=d.split("\t"), p=parts.length>1?parts.shift():pos, body=parts.join(" ")||d; senses.push({pos:p,text:body}); });
+      senses=selectSenses(senses,3); english=senses[0]?senses[0].text:"";
+      return {phonetic:cleanPhonetic(ph),english:english,pos:pos,senses:senses,source:"datamuse"};
     });
   }
   function lookupFreeDictionary(key){
@@ -708,8 +777,10 @@
       var entry=data&&data[0]; if(!entry) throw new Error("not found");
       var phonetic=entry.phonetic||"", audio="";
       (entry.phonetics||[]).forEach(function(p){ if(!phonetic&&p.text) phonetic=p.text; if(!audio&&p.audio) audio=p.audio.indexOf("//")===0?"https:"+p.audio:p.audio; });
-      var meaning=(entry.meanings||[]).find(function(m){return m.definitions&&m.definitions[0]&&m.definitions[0].definition;});
-      return {phonetic:cleanPhonetic(phonetic),audio:audio,english:meaning?meaning.definitions[0].definition:"",pos:meaning?(POS_ZH[meaning.partOfSpeech]||meaning.partOfSpeech||""):"",source:"free-dictionary"};
+      var senses=[];
+      (entry.meanings||[]).forEach(function(m){ (m.definitions||[]).slice(0,2).forEach(function(d){ if(d.definition) senses.push({pos:POS_ZH[m.partOfSpeech]||m.partOfSpeech||"",text:d.definition}); }); });
+      senses=selectSenses(senses,3);
+      return {phonetic:cleanPhonetic(phonetic),audio:audio,english:senses[0]?senses[0].text:"",pos:senses[0]?senses[0].pos:"",senses:senses,source:"free-dictionary"};
     });
   }
   function translateToChinese(text){
@@ -720,16 +791,27 @@
       return fetchJSON(mm,6500).then(function(data){var t=data&&data.responseData&&data.responseData.translatedText;return t&&t!==text?t:"";}).catch(function(){return "";});
     });
   }
+  function translateSenseToChinese(text){
+    if(!text) return Promise.resolve("");
+    var mm="https://api.mymemory.translated.net/get?q="+encodeURIComponent(text)+"&langpair=en%7Czh-CN";
+    return fetchJSON(mm,6500).then(function(data){
+      var t=data&&data.responseData&&data.responseData.translatedText;
+      if(!t||t===text) throw 0; return t;
+    }).catch(function(){ return translateToChinese(text); });
+  }
   function completeLookup(cn,lex){
     cn=cn||{}; lex=lex||{};
-    var finish=function(zh){
-      var body=zh||lex.english||"", pos=lex.pos||"";
-      if(!body && !cn.phonetic && !lex.phonetic) throw new Error("no usable result");
-      return {phonetic:cn.phonetic||lex.phonetic||"",audio:lex.audio||"",def:(pos&&body?pos+" ":"")+body,english:lex.english||"",source:[cn.source,lex.source].filter(Boolean).join("+")};
+    var lexSenses=selectSenses(lex.senses||[],3), cnSenses=selectSenses(cn.senses||[],3);
+    var finish=function(senses){
+      var def=sensesToDef(senses);
+      if(!def && !cn.phonetic && !lex.phonetic) throw new Error("no usable result");
+      return {phonetic:cn.phonetic||lex.phonetic||"",audio:lex.audio||"",def:def,english:lex.english||"",source:[cn.source,lex.source].filter(Boolean).join("+")};
     };
-    if(cn.zh) return Promise.resolve(finish(cn.zh));
-    if(lex.english) return translateToChinese(lex.english).then(finish);
-    return Promise.resolve(finish(""));
+    if(cnSenses.length>=2) return Promise.resolve(finish(cnSenses));
+    if(!lexSenses.length) return Promise.resolve(finish(cnSenses.length?cnSenses:[{pos:"",text:cn.zh||""}]));
+    return Promise.all(lexSenses.map(function(s){
+      return translateSenseToChinese(translationSeed(s.text)).then(function(zh){return {pos:s.pos,text:zh||cn.zh||s.text};});
+    })).then(finish);
   }
   function lookupWord(key){
     // 优先并行请求国内翻译源和 Datamuse；两者都失败时才请求原词典，避免 522 拖慢录入。
@@ -739,9 +821,9 @@
     });
   }
   var enrichStatus={};
-  function enrichWords(keys){
+  function enrichWords(keys,force){
     keys = (keys || Object.keys(state.words)).filter(function(k){
-      var w=state.words[k]; return w && (!w.phonetic || !w.def);
+      var w=state.words[k]; return w && (force || !w.phonetic || !w.def);
     });
     if(!keys.length){ setImportProgress(0,0,false); return Promise.resolve({ok:0,failed:0}); }
     var done=0, ok=0, failed=0;
@@ -753,7 +835,7 @@
           var w=state.words[key]; if(!w) return;
           if(info.phonetic) w.phonetic=info.phonetic;
           if(info.audio) w.audio=info.audio;
-          if(!w.def && info.def) w.def=info.def;
+          if((force||!w.def) && info.def) w.def=info.def;
           w.lookupSource=info.source||""; w.updatedAt=Date.now(); enrichStatus[key]="success"; ok++;
         }).catch(function(){ enrichStatus[key]="failed"; failed++; }).then(function(){
           done++; setImportProgress(done,keys.length,true); save(); renderLibrary($("search").value);
@@ -1260,9 +1342,10 @@
   }
 
   function formatDef(def){
-    var m = def.match(/^([a-z]+\.)\s*(.*)$/i);
-    if(m) return '<span class="pos">'+esc(m[1])+'</span> '+esc(m[2]);
-    return esc(def);
+    return String(def||"").split(/\s*[｜|]\s*/).map(function(part){
+      var m = part.match(/^([a-z]+\.)\s*(.*)$/i);
+      return m ? '<span class="pos">'+esc(m[1])+'</span> '+esc(m[2]) : esc(part);
+    }).join('<br>');
   }
 
   function answer(key, grade){
@@ -1308,7 +1391,7 @@
       shown++;
     });
     tbody.innerHTML = html;
-    tbody.querySelectorAll("[data-enrich]").forEach(function(b){ b.onclick=function(){ enrichWords([this.getAttribute("data-enrich")]); }; });
+    tbody.querySelectorAll("[data-enrich]").forEach(function(b){ b.onclick=function(){ enrichWords([this.getAttribute("data-enrich")],true); }; });
     tbody.querySelectorAll("[data-say]").forEach(function(b){ b.onclick=function(){ playWord(this.getAttribute("data-say")); }; });
     tbody.querySelectorAll("[data-edit]").forEach(function(b){ b.onclick=function(){ editWord(this.getAttribute("data-edit")); }; });
     $("count").textContent = "共 " + keys.length + " 词" + (filter ? "，匹配 " + shown : "");
