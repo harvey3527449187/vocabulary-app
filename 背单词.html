@@ -605,6 +605,8 @@
     if(!state.settings.newPerDay) state.settings.newPerDay = 20;
     if(typeof state.settings.autoEnrich !== "boolean") state.settings.autoEnrich = true;
     state.activity = state.activity || {};
+    var seedDefs={};
+    parseTxt(SEED).forEach(function(x){seedDefs[x[0].toLowerCase()]=x[1];});
     Object.keys(state.words || {}).forEach(function(k){
       var w = state.words[k];
       if(typeof w.phonetic !== "string") w.phonetic = "";
@@ -614,8 +616,13 @@
         changed = true;
       }
       if(typeof w.audio !== "string") w.audio = "";
+      if((state.settings.definitionStyleVersion||0)<2 && w.lookupSource && /[｜|]/.test(w.def||"")){
+        w.def = seedDefs[k] || compactStoredDef(w.def);
+        changed = true;
+      }
       if(!w.updatedAt) w.updatedAt = Date.now();
     });
+    if((state.settings.definitionStyleVersion||0)<2){ state.settings.definitionStyleVersion=2; changed=true; }
     return changed;
   }
 
@@ -716,12 +723,12 @@
     return text.length>90?text.slice(0,90):text;
   }
   function conciseSense(text){
-    text=cleanSenseText(text).replace(/[;；。,.，]+$/g,"");
-    var colon=text.search(/[:：]/); if(colon>1&&colon<=18) text=text.slice(0,colon);
-    if(text.length>22){
-      var cut=text.search(/[，；。]/); if(cut>=4&&cut<=22) text=text.slice(0,cut);
+    text=cleanSenseText(text).replace(/^[（(][^）)]{1,8}[）)]\s*/,"").replace(/[;；。,.，]+$/g,"");
+    var colon=text.search(/[:：]/); if(colon>1&&colon<=12) text=text.slice(0,colon);
+    if(text.length>14){
+      var cut=text.search(/[，；。]/); if(cut>=2&&cut<=14) text=text.slice(0,cut);
     }
-    return text.length>28?text.slice(0,28)+"…":text;
+    return text.length>16?text.slice(0,16)+"…":text;
   }
   function senseFromText(text, fallbackPos){
     text=cleanSenseText(text); if(!text) return null;
@@ -750,7 +757,7 @@
     return same/Math.min(aw.length,bw.length)<0.65;
   }
   function selectSenses(senses,limit){
-    limit=limit||3; var clean=[], seen={};
+    limit=limit||2; var clean=[], seen={};
     (senses||[]).forEach(function(s){
       if(!s) return; var item={pos:normalizePos(s.pos),text:cleanSenseText(s.text||s.english)};
       var id=item.pos+"|"+item.text.toLowerCase();
@@ -766,7 +773,12 @@
     return chosen.slice(0,limit);
   }
   function sensesToDef(senses){
-    return selectSenses(senses,3).map(function(s){return (s.pos?s.pos+" ":"")+conciseSense(s.text);}).join("｜");
+    return selectSenses(senses,2).map(function(s){return (s.pos?s.pos+" ":"")+conciseSense(s.text);}).join("｜");
+  }
+  function compactStoredDef(def){
+    return String(def||"").split(/\s*[｜|]\s*/).slice(0,2).map(function(part){
+      var s=senseFromText(part,""); return s?(s.pos?s.pos+" ":"")+conciseSense(s.text):conciseSense(part);
+    }).filter(Boolean).join("｜");
   }
   function lookupChina(key){
     var url="https://apii.xianyuw.cn/api/v1/youdao-translate?text="+encodeURIComponent(key)+"&from=en&to=zh-CHS";
@@ -774,7 +786,7 @@
       var root=data&&data.data, zh=root&&root.result;
       if(!root || !zh || zh.toLowerCase()===key.toLowerCase()) throw new Error("no chinese result");
       var ph=deepFind(root.detail||root,["phonetic","ukphone","usphone","phone","pronunciation"],0);
-      var senses=selectSenses(collectChinaSenses(root.detail||root,0,[]),3);
+      var senses=selectSenses(collectChinaSenses(root.detail||root,0,[]),2);
       return {zh:zh,senses:senses,phonetic:cleanPhonetic(ph),source:"youdao-mirror"};
     });
   }
@@ -782,10 +794,16 @@
     var url="https://api.datamuse.com/words?sp="+encodeURIComponent(key)+"&qe=sp&md=dpr&ipa=1&max=1";
     return fetchJSON(url,6500).then(function(data){
       var item=data&&data[0]; if(!item || (item.word||"").toLowerCase()!==key.toLowerCase()) throw new Error("not found");
-      var tags=item.tags||[], ph="", pos="", english="", senses=[];
-      tags.forEach(function(t){ if(t.indexOf("pron:")===0) ph=t.slice(5); else if(!pos && /^(n|v|adj|adv)$/.test(t)) pos=t+"."; });
-      (item.defs||[]).forEach(function(d){ var parts=d.split("\t"), p=parts.length>1?parts.shift():pos, body=parts.join(" ")||d; senses.push({pos:p,text:body}); });
-      senses=selectSenses(senses,3); english=senses[0]?senses[0].text:"";
+      var tags=item.tags||[], ph="", pos="", english="", senses=[], allowed=[];
+      tags.forEach(function(t){
+        if(t.indexOf("pron:")===0) ph=t.slice(5);
+        else if(/^(n|v|adj|adv)$/.test(t)){ var p=normalizePos(t); if(!pos) pos=p; if(allowed.indexOf(p)<0) allowed.push(p); }
+      });
+      (item.defs||[]).forEach(function(d){
+        var parts=d.split("\t"), p=normalizePos(parts.length>1?parts.shift():pos), body=parts.join(" ")||d;
+        if(!allowed.length || allowed.indexOf(p)>=0) senses.push({pos:p,text:body});
+      });
+      senses=selectSenses(senses,2); english=senses[0]?senses[0].text:"";
       return {phonetic:cleanPhonetic(ph),english:english,pos:pos,senses:senses,source:"datamuse"};
     });
   }
@@ -797,7 +815,7 @@
       (entry.phonetics||[]).forEach(function(p){ if(!phonetic&&p.text) phonetic=p.text; if(!audio&&p.audio) audio=p.audio.indexOf("//")===0?"https:"+p.audio:p.audio; });
       var senses=[];
       (entry.meanings||[]).forEach(function(m){ (m.definitions||[]).slice(0,2).forEach(function(d){ if(d.definition) senses.push({pos:POS_ZH[m.partOfSpeech]||m.partOfSpeech||"",text:d.definition}); }); });
-      senses=selectSenses(senses,3);
+      senses=selectSenses(senses,2);
       return {phonetic:cleanPhonetic(phonetic),audio:audio,english:senses[0]?senses[0].text:"",pos:senses[0]?senses[0].pos:"",senses:senses,source:"free-dictionary"};
     });
   }
@@ -819,7 +837,7 @@
   }
   function completeLookup(cn,lex){
     cn=cn||{}; lex=lex||{};
-    var lexSenses=selectSenses(lex.senses||[],3), cnSenses=selectSenses(cn.senses||[],3);
+    var lexSenses=selectSenses(lex.senses||[],2), cnSenses=selectSenses(cn.senses||[],2);
     var finish=function(senses){
       var def=sensesToDef(senses);
       if(!def && !cn.phonetic && !lex.phonetic) throw new Error("no usable result");
@@ -827,6 +845,14 @@
     };
     if(cnSenses.length>=2) return Promise.resolve(finish(cnSenses));
     if(!lexSenses.length) return Promise.resolve(finish(cnSenses.length?cnSenses:[{pos:"",text:cn.zh||""}]));
+    if(cn.zh){
+      var mainPos=lexSenses[0].pos||lex.pos||"", primary={pos:mainPos,text:cn.zh};
+      var other=lexSenses.find(function(s){return s.pos&&s.pos!==mainPos;});
+      if(!other) return Promise.resolve(finish([primary]));
+      return translateSenseToChinese(translationSeed(other.text)).then(function(zh){
+        return finish([primary,{pos:other.pos,text:zh||other.text}]);
+      });
+    }
     return Promise.all(lexSenses.map(function(s){
       return translateSenseToChinese(translationSeed(s.text)).then(function(zh){return {pos:s.pos,text:zh||cn.zh||s.text};});
     })).then(finish);
