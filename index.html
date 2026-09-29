@@ -157,6 +157,12 @@
   .mini-bar i{height:100%; display:block; background:var(--accent); transition:width .2s;}
   .row-actions{display:flex; gap:6px;}
   .icon-btn{border:0; background:#f0f2f7; color:#596174; border-radius:8px; padding:6px 8px; cursor:pointer;}
+  .lookup-state{display:inline-flex;align-items:center;gap:5px;margin-top:5px;font-size:11px;color:var(--muted);}
+  .lookup-state:before{content:"";width:6px;height:6px;border-radius:50%;background:#b9beca;}
+  .lookup-state.loading{color:var(--accent);}.lookup-state.loading:before{background:var(--accent);animation:pulse 1s infinite;}
+  .lookup-state.success{color:var(--good);}.lookup-state.success:before{background:var(--good);}
+  .lookup-state.failed{color:var(--again);}.lookup-state.failed:before{background:var(--again);}
+  @keyframes pulse{50%{opacity:.25;transform:scale(.75)}}
   .empty{padding:38px 16px; text-align:center; color:var(--muted);}
 
   /* 视觉升级 */
@@ -324,7 +330,7 @@
       <div class="import-progress" id="importProgress"><span id="importProgressText"></span><div class="mini-bar"><i id="importProgressBar"></i></div></div>
 
       <div class="card-title">联网自动补全</div>
-      <p class="note">只写英文单词也可以。导入后会自动查询音标、发音和英文释义，并把释义翻译成中文；已填写的中文释义不会被覆盖。免费接口偶尔会限流，失败的词可稍后在「词库」点击“联网补全”重试。</p>
+      <p class="note">只写英文单词也可以。导入后会自动查询音标、发音和英文释义，并把释义翻译成中文；已填写的中文释义不会被覆盖。网站会在国内翻译源、Datamuse 和 Free Dictionary 之间自动切换，单词右侧的 ↻ 可单独重试。</p>
       <div class="field">
         <label for="autoEnrich"><input type="checkbox" id="autoEnrich" checked> 导入后自动联网补全</label>
       </div>
@@ -662,32 +668,77 @@
       return r.json();
     }).finally(function(){ if(timer) clearTimeout(timer); });
   }
-  function translateToChinese(text){
-    if(!text) return Promise.resolve("");
-    var url = "https://api.mymemory.translated.net/get?q="+encodeURIComponent(text)+"&langpair=en%7Czh-CN";
-    return fetchJSON(url, 12000).then(function(data){
-      var t = data && data.responseData && data.responseData.translatedText;
-      return t && t !== text ? t : "";
-    }).catch(function(){ return ""; });
+  function cleanPhonetic(value){
+    value=(value||"").trim(); if(!value) return "";
+    return value.charAt(0)==="/" ? value : "/"+value+"/";
   }
-  function lookupWord(key){
-    var url = "https://api.dictionaryapi.dev/api/v2/entries/en/"+encodeURIComponent(key);
-    return fetchJSON(url, 12000).then(function(data){
-      var entry = data && data[0];
-      if(!entry) throw new Error("not found");
-      var phonetic = entry.phonetic || "", audio = "";
-      (entry.phonetics || []).forEach(function(p){
-        if(!phonetic && p.text) phonetic = p.text;
-        if(!audio && p.audio) audio = p.audio.indexOf("//")===0 ? "https:"+p.audio : p.audio;
-      });
-      var meaning = (entry.meanings || []).find(function(m){ return m.definitions && m.definitions[0] && m.definitions[0].definition; });
-      var english = meaning ? meaning.definitions[0].definition : "";
-      var pos = meaning ? (POS_ZH[meaning.partOfSpeech] || meaning.partOfSpeech || "") : "";
-      return translateToChinese(english).then(function(zh){
-        return {phonetic:phonetic ? (phonetic.charAt(0)==="/" ? phonetic : "/"+phonetic+"/") : "", audio:audio, def:(pos ? pos+" " : "")+(zh||english), english:english};
-      });
+  function deepFind(obj,names,depth){
+    if(!obj || depth>7) return "";
+    if(Array.isArray(obj)){ for(var i=0;i<obj.length;i++){ var a=deepFind(obj[i],names,depth+1); if(a) return a; } return ""; }
+    if(typeof obj!=="object") return "";
+    var keys=Object.keys(obj);
+    for(var j=0;j<keys.length;j++){
+      if(names.indexOf(keys[j].toLowerCase())>=0 && typeof obj[keys[j]]==="string" && obj[keys[j]].trim()) return obj[keys[j]].trim();
+    }
+    for(var k=0;k<keys.length;k++){ var b=deepFind(obj[keys[k]],names,depth+1); if(b) return b; }
+    return "";
+  }
+  function lookupChina(key){
+    var url="https://apii.xianyuw.cn/api/v1/youdao-translate?text="+encodeURIComponent(key)+"&from=en&to=zh-CHS";
+    return fetchJSON(url,6500).then(function(data){
+      var root=data&&data.data, zh=root&&root.result;
+      if(!root || !zh || zh.toLowerCase()===key.toLowerCase()) throw new Error("no chinese result");
+      var ph=deepFind(root.detail||root,["phonetic","ukphone","usphone","phone","pronunciation"],0);
+      return {zh:zh,phonetic:cleanPhonetic(ph),source:"youdao-mirror"};
     });
   }
+  function lookupDatamuse(key){
+    var url="https://api.datamuse.com/words?sp="+encodeURIComponent(key)+"&qe=sp&md=dpr&ipa=1&max=1";
+    return fetchJSON(url,6500).then(function(data){
+      var item=data&&data[0]; if(!item || (item.word||"").toLowerCase()!==key.toLowerCase()) throw new Error("not found");
+      var tags=item.tags||[], ph="", pos="", english="";
+      tags.forEach(function(t){ if(t.indexOf("pron:")===0) ph=t.slice(5); else if(!pos && /^(n|v|adj|adv)$/.test(t)) pos=t+"."; });
+      if(item.defs&&item.defs[0]){ var parts=item.defs[0].split("\t"); if(!pos&&parts.length>1) pos=parts[0]+"."; english=parts.length>1?parts.slice(1).join(" "):parts[0]; }
+      return {phonetic:cleanPhonetic(ph),english:english,pos:pos,source:"datamuse"};
+    });
+  }
+  function lookupFreeDictionary(key){
+    var url="https://api.dictionaryapi.dev/api/v2/entries/en/"+encodeURIComponent(key);
+    return fetchJSON(url,4200).then(function(data){
+      var entry=data&&data[0]; if(!entry) throw new Error("not found");
+      var phonetic=entry.phonetic||"", audio="";
+      (entry.phonetics||[]).forEach(function(p){ if(!phonetic&&p.text) phonetic=p.text; if(!audio&&p.audio) audio=p.audio.indexOf("//")===0?"https:"+p.audio:p.audio; });
+      var meaning=(entry.meanings||[]).find(function(m){return m.definitions&&m.definitions[0]&&m.definitions[0].definition;});
+      return {phonetic:cleanPhonetic(phonetic),audio:audio,english:meaning?meaning.definitions[0].definition:"",pos:meaning?(POS_ZH[meaning.partOfSpeech]||meaning.partOfSpeech||""):"",source:"free-dictionary"};
+    });
+  }
+  function translateToChinese(text){
+    if(!text) return Promise.resolve("");
+    var cn="https://apii.xianyuw.cn/api/v1/youdao-translate?text="+encodeURIComponent(text)+"&from=en&to=zh-CHS";
+    return fetchJSON(cn,6500).then(function(data){ var t=data&&data.data&&data.data.result; if(!t||t===text) throw 0; return t; }).catch(function(){
+      var mm="https://api.mymemory.translated.net/get?q="+encodeURIComponent(text)+"&langpair=en%7Czh-CN";
+      return fetchJSON(mm,6500).then(function(data){var t=data&&data.responseData&&data.responseData.translatedText;return t&&t!==text?t:"";}).catch(function(){return "";});
+    });
+  }
+  function completeLookup(cn,lex){
+    cn=cn||{}; lex=lex||{};
+    var finish=function(zh){
+      var body=zh||lex.english||"", pos=lex.pos||"";
+      if(!body && !cn.phonetic && !lex.phonetic) throw new Error("no usable result");
+      return {phonetic:cn.phonetic||lex.phonetic||"",audio:lex.audio||"",def:(pos&&body?pos+" ":"")+body,english:lex.english||"",source:[cn.source,lex.source].filter(Boolean).join("+")};
+    };
+    if(cn.zh) return Promise.resolve(finish(cn.zh));
+    if(lex.english) return translateToChinese(lex.english).then(finish);
+    return Promise.resolve(finish(""));
+  }
+  function lookupWord(key){
+    // 优先并行请求国内翻译源和 Datamuse；两者都失败时才请求原词典，避免 522 拖慢录入。
+    return Promise.all([lookupChina(key).catch(function(){return null;}),lookupDatamuse(key).catch(function(){return null;})]).then(function(parts){
+      if(parts[0]||parts[1]) return completeLookup(parts[0],parts[1]);
+      return lookupFreeDictionary(key).then(function(lex){return completeLookup(null,lex);});
+    });
+  }
+  var enrichStatus={};
   function enrichWords(keys){
     keys = (keys || Object.keys(state.words)).filter(function(k){
       var w=state.words[k]; return w && (!w.phonetic || !w.def);
@@ -697,13 +748,14 @@
     setImportProgress(0,keys.length,true);
     return keys.reduce(function(p,key){
       return p.then(function(){
+        enrichStatus[key]="loading"; renderLibrary($("search").value);
         return lookupWord(key).then(function(info){
           var w=state.words[key]; if(!w) return;
           if(info.phonetic) w.phonetic=info.phonetic;
           if(info.audio) w.audio=info.audio;
           if(!w.def && info.def) w.def=info.def;
-          w.updatedAt=Date.now(); ok++;
-        }).catch(function(){ failed++; }).then(function(){
+          w.lookupSource=info.source||""; w.updatedAt=Date.now(); enrichStatus[key]="success"; ok++;
+        }).catch(function(){ enrichStatus[key]="failed"; failed++; }).then(function(){
           done++; setImportProgress(done,keys.length,true); save(); renderLibrary($("search").value);
         });
       });
@@ -1245,16 +1297,18 @@
       else { status="已安排"; cls="later"; }
       var due = (w.repetition === 0 && !w.lastReview) ? "—" : w.due;
       var ph = phon(key);
+      var look=enrichStatus[key]||((!w.def||!ph)?"idle":""), lookText={loading:"正在补全",success:"补全成功",failed:"补全失败，可重试",idle:"等待补全"}[look]||"";
       html += '<tr>' +
         '<td class="w-cell">'+esc(display)+(ph?'<span class="ph">'+esc(ph)+'</span>':'')+'</td>' +
-        '<td>'+esc(w.def || '—')+'</td>' +
+        '<td>'+esc(w.def || '—')+(lookText?'<span class="lookup-state '+look+'">'+lookText+'</span>':'')+'</td>' +
         '<td><span class="pill '+cls+'">'+status+'</span></td>' +
         '<td>'+esc(due)+'</td>' +
-        '<td><div class="row-actions"><button class="icon-btn" data-say="'+esc(key)+'" title="发音">🔊</button><button class="icon-btn" data-edit="'+esc(key)+'" title="编辑">✏️</button></div></td>' +
+        '<td><div class="row-actions"><button class="icon-btn" data-enrich="'+esc(key)+'" title="重新联网补全">↻</button><button class="icon-btn" data-say="'+esc(key)+'" title="发音">🔊</button><button class="icon-btn" data-edit="'+esc(key)+'" title="编辑">✏️</button></div></td>' +
       '</tr>';
       shown++;
     });
     tbody.innerHTML = html;
+    tbody.querySelectorAll("[data-enrich]").forEach(function(b){ b.onclick=function(){ enrichWords([this.getAttribute("data-enrich")]); }; });
     tbody.querySelectorAll("[data-say]").forEach(function(b){ b.onclick=function(){ playWord(this.getAttribute("data-say")); }; });
     tbody.querySelectorAll("[data-edit]").forEach(function(b){ b.onclick=function(){ editWord(this.getAttribute("data-edit")); }; });
     $("count").textContent = "共 " + keys.length + " 词" + (filter ? "，匹配 " + shown : "");

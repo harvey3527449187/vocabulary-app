@@ -1,4 +1,4 @@
-const CACHE = "vocab-app-v4";
+const CACHE = "vocab-app-v5";
 const APP_SHELL = ["./", "./背单词.html", "./manifest.webmanifest"];
 
 self.addEventListener("install", event => {
