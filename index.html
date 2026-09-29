@@ -590,6 +590,7 @@
   var retryQueue = [];
   var studyTotal = 0;
   var session = {again:0, hard:0, good:0};
+  var phoneticRepairKeys = [];
 
   function defaultWord(def){
     return {def: def||"", repetition:0, interval:0, easiness:2.5, due: todayStr(),
@@ -599,6 +600,7 @@
     return { words:{}, settings:{ newPerDay:20, autoEnrich:true }, learned:0, activity:{} };
   }
   function migrateState(){
+    var changed = false;
     state.settings = state.settings || {};
     if(!state.settings.newPerDay) state.settings.newPerDay = 20;
     if(typeof state.settings.autoEnrich !== "boolean") state.settings.autoEnrich = true;
@@ -606,27 +608,35 @@
     Object.keys(state.words || {}).forEach(function(k){
       var w = state.words[k];
       if(typeof w.phonetic !== "string") w.phonetic = "";
+      if(isBadPhonetic(w.phonetic)){
+        w.phonetic = PHONETICS[k] || "";
+        if(!w.phonetic) phoneticRepairKeys.push(k);
+        changed = true;
+      }
       if(typeof w.audio !== "string") w.audio = "";
       if(!w.updatedAt) w.updatedAt = Date.now();
     });
+    return changed;
   }
 
   function parseTxt(text){
     var lines = text.split(/\r?\n/), out = [];
     for(var i=0;i<lines.length;i++){
-      var line = lines[i].trim();
+      var line = lines[i].replace(/^\uFEFF/,"").trim();
       if(!line) continue;
       if(/^\d{1,2}-\d{1,2}$/.test(line)) continue;
       if(/^\d+$/.test(line)) continue;
       var word, def = "";
       if(line.indexOf("\t") >= 0){
         var p = line.split(/\t+/); word = p[0]; def = p.slice(1).join(" ").trim();
+      } else if(/[,，]/.test(line)){
+        var comma=line.search(/[,，]/); word=line.slice(0,comma); def=line.slice(comma+1).trim();
       } else {
         var m = line.match(/^(\S+)\s+(.+)$/);
         if(m){ word = m[1]; def = m[2].trim(); } else { word = line; }
       }
       word = word.replace(/[.。,\s]+$/,"").trim();
-      if(!word) continue;
+      if(!word || !/^[a-zA-Z][a-zA-Z\-' ]*$/.test(word)) continue;
       out.push([word, def]);
     }
     return out;
@@ -641,21 +651,23 @@
     }
   }
   function importText(text){
-    var items = parseTxt(text), added = 0, updated = 0, keys = [];
+    var items = parseTxt(text), added = 0, updated = 0, duplicates = 0, keys = [], queued = {};
     for(var i=0;i<items.length;i++){
       var key = items[i][0].toLowerCase(), def = items[i][1];
       if(state.words[key]){
+        duplicates++;
         if(!state.words[key].def && def){ state.words[key].def = def; state.words[key].updatedAt=Date.now(); updated++; }
-        if(!state.words[key].phonetic || !state.words[key].def) keys.push(key);
+        if((!state.words[key].phonetic || !state.words[key].def) && !queued[key]){ keys.push(key); queued[key]=1; }
         continue;
       }
       state.words[key] = defaultWord(def);
       state.words[key].word = items[i][0];
-      keys.push(key);
+      if(!queued[key]){ keys.push(key); queued[key]=1; }
       added++;
     }
     if(added || updated) save();
-    return {added:added, updated:updated, keys:keys};
+    var nonempty=text.split(/\r?\n/).filter(function(x){return x.trim();}).length;
+    return {added:added, updated:updated, duplicates:duplicates, skipped:Math.max(0,nonempty-items.length), keys:keys};
   }
 
   /* ============ 联网词典：音标、发音、英文释义、中文翻译 ============ */
@@ -669,8 +681,14 @@
     }).finally(function(){ if(timer) clearTimeout(timer); });
   }
   function cleanPhonetic(value){
-    value=(value||"").trim(); if(!value) return "";
-    return value.charAt(0)==="/" ? value : "/"+value+"/";
+    value=(value||"").trim(); if(!value || isBadPhonetic(value)) return "";
+    value=value.replace(/^\/+|\/+$/g,"").trim();
+    return value ? "/"+value+"/" : "";
+  }
+  function isBadPhonetic(value){
+    var inner=String(value||"").replace(/^\/+|\/+$/g,"").trim();
+    if(!inner) return false;
+    return /\d/.test(inner) || (/\s/.test(inner) && /^[A-Z\s]+$/.test(inner));
   }
   function deepFind(obj,names,depth){
     if(!obj || depth>7) return "";
@@ -816,7 +834,15 @@
   function lookupWord(key){
     // 优先并行请求国内翻译源和 Datamuse；两者都失败时才请求原词典，避免 522 拖慢录入。
     return Promise.all([lookupChina(key).catch(function(){return null;}),lookupDatamuse(key).catch(function(){return null;})]).then(function(parts){
-      if(parts[0]||parts[1]) return completeLookup(parts[0],parts[1]);
+      if(parts[0]&&parts[0].phonetic || parts[1]&&parts[1].phonetic || PHONETICS[key]){
+        if(PHONETICS[key] && !(parts[0]&&parts[0].phonetic) && parts[1]) parts[1].phonetic=PHONETICS[key];
+        return completeLookup(parts[0],parts[1]);
+      }
+      if(parts[0]||parts[1]) return lookupFreeDictionary(key).then(function(fd){
+        var lex=parts[1]||{}; lex.phonetic=fd.phonetic||""; lex.audio=fd.audio||lex.audio||"";
+        if(!lex.senses||!lex.senses.length) lex.senses=fd.senses;
+        return completeLookup(parts[0],lex);
+      }).catch(function(){return completeLookup(parts[0],parts[1]);});
       return lookupFreeDictionary(key).then(function(lex){return completeLookup(null,lex);});
     });
   }
@@ -852,7 +878,7 @@
     if(show){ $("importProgressText").textContent="正在联网补全 "+done+" / "+total; $("importProgressBar").style.width=(total?Math.round(done/total*100):0)+"%"; }
   }
   function finishImport(res){
-    $("importResult").textContent="✅ 新增 "+res.added+" 词，补充释义 "+res.updated+" 个。";
+    $("importResult").textContent="✅ 新增 "+res.added+" 词，补充释义 "+res.updated+" 个"+(res.duplicates?"，已跳过重复 "+res.duplicates+" 个":"")+(res.skipped?"，未识别 "+res.skipped+" 行":"")+"。";
     renderLibrary($("search").value);
     if(state.settings.autoEnrich && res.keys.length){
       enrichWords(res.keys).then(function(x){ $("importResult").textContent += " 联网补全成功 "+x.ok+" 个"+(x.failed?"，失败 "+x.failed+" 个，可稍后重试。":"。"); renderStudy(); });
@@ -1596,7 +1622,7 @@
     try { return JSON.parse(raw); } catch(e){ return null; }
   }
   function afterLoad(){
-    migrateState();
+    var repaired=migrateState();
     var syncCfg=getSyncConfig();
     $("syncUrl").value=syncCfg.url||""; $("syncKey").value=syncCfg.key||""; $("syncId").value=syncCfg.id||"";
     if(validSyncConfig(syncCfg)) showSyncState(syncCfg.lastSync ? "已配置 · 上次同步 "+new Date(syncCfg.lastSync).toLocaleString() : "已配置，等待首次同步",!!syncCfg.lastSync);
@@ -1610,6 +1636,8 @@
     startStudy(); renderLibrary("");
     updateFolderUI();
     bindEvents();
+    if(repaired) save();
+    if(state.settings.autoEnrich && phoneticRepairKeys.length) enrichWords(phoneticRepairKeys.slice());
     if(validSyncConfig(syncCfg)) cloudSyncNow(true).catch(function(){});
     // 若已授权目录，自动读取单词.txt（静默同步新词）
     if(fsSupported()) getDirHandle().then(function(dir){
