@@ -62,6 +62,21 @@
   .g-hard{background:var(--hard-soft); color:var(--hard);}
   .g-good{background:var(--good-soft); color:var(--good);}
 
+  /* 四选一认词 */
+  .quiz-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;margin-top:10px;}
+  .quiz-option{position:relative;border:1.5px solid var(--line);background:#fafbfe;color:var(--ink);
+    min-height:68px;padding:14px 16px;border-radius:14px;text-align:left;font-size:16px;line-height:1.45;
+    cursor:pointer;transition:.16s;font-family:inherit;}
+  .quiz-option:hover{border-color:#b9c4fb;background:#f5f7ff;transform:translateY(-1px);}
+  .quiz-option .choice-key{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;
+    margin-right:8px;border-radius:8px;background:#eceff8;color:var(--muted);font-size:12px;font-weight:800;vertical-align:top;}
+  .quiz-option.correct{border-color:var(--good);background:var(--good-soft);color:#20794a;}
+  .quiz-option.wrong{border-color:var(--again);background:var(--again-soft);color:var(--again);}
+  .quiz-option:disabled{cursor:default;transform:none;opacity:1;}
+  .quiz-feedback{min-height:24px;font-size:15px;font-weight:700;margin-top:4px;}
+  .quiz-next{border:0;background:var(--accent);color:#fff;padding:11px 28px;border-radius:12px;font-size:15px;
+    font-weight:700;cursor:pointer;display:none;}
+
   /* 完成页 */
   .done{background:var(--card); border-radius:var(--radius); box-shadow:0 6px 24px rgba(30,40,80,.08);
     padding:44px 32px; text-align:center;}
@@ -238,6 +253,8 @@
     .dashboard{grid-template-columns:repeat(2,1fr);}
     .card{padding:34px 18px; min-height:310px;}
     .word{font-size:38px;}
+    .quiz-options{grid-template-columns:1fr;gap:9px;}
+    .quiz-option{min-height:58px;padding:12px 13px;font-size:15px;}
     .grades{position:sticky; bottom:10px;}
     th:nth-child(4),td:nth-child(4){display:none;}
     .form-grid{grid-template-columns:1fr;}.form-item.full{grid-column:auto;}
@@ -263,7 +280,7 @@
     <section class="panel active" id="study">
       <div class="dashboard" id="dashboard"></div>
       <div class="mode-switch">
-        <button class="mode-btn active" data-mode="recall">👀 看词回忆</button>
+        <button class="mode-btn active" data-mode="recall">🎯 四选一认词</button>
         <button class="mode-btn" data-mode="spell">✏️ 拼写默写</button>
       </div>
       <div id="studyView"></div>
@@ -1183,15 +1200,16 @@
   function renderDone(v){
     var total = studyTotal || queue.length;
     var more = buildExtra(1).length > 0;
+    var statHtml = mode==="recall" ?
+      '<div class="stat"><b>'+session.good+'</b><span>答对</span></div><div class="stat"><b>'+session.again+'</b><span>答错</span></div>' :
+      '<div class="stat"><b>'+session.good+'</b><span>认识</span></div><div class="stat"><b>'+session.hard+'</b><span>模糊</span></div><div class="stat"><b>'+session.again+'</b><span>忘记</span></div>';
     v.innerHTML =
       '<div class="done">' +
         '<div class="emoji">🎉</div>' +
         '<h2>今日学习完成</h2>' +
         '<div class="stats">' +
           '<div class="stat"><b>'+total+'</b><span>本轮复习</span></div>' +
-          '<div class="stat"><b>'+session.good+'</b><span>认识</span></div>' +
-          '<div class="stat"><b>'+session.hard+'</b><span>模糊</span></div>' +
-          '<div class="stat"><b>'+session.again+'</b><span>忘记</span></div>' +
+          statHtml +
         '</div>' +
         (more ?
           '<div class="more-box"><p>还没学够？可以继续学（优先剩余新词，不足则提前复习即将到期的词）</p>' +
@@ -1217,61 +1235,64 @@
     };
   }
 
+  function primaryPos(def){
+    var m=String(def||"").match(/^([a-z]+\.)\s*/i); return m?m[1].toLowerCase():"";
+  }
+  function shuffleList(list){
+    list=list.slice();
+    for(var i=list.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)), t=list[i]; list[i]=list[j]; list[j]=t; }
+    return list;
+  }
+  function quizChoices(key){
+    var correct=(state.words[key].def||"暂无释义").trim(), pos=primaryPos(correct), seen={};
+    seen[correct.replace(/\s+/g,"").toLowerCase()]=1;
+    var pool=Object.keys(state.words).filter(function(k){
+      var d=(state.words[k].def||"").trim(), id=d.replace(/\s+/g,"").toLowerCase();
+      if(k===key||!d||seen[id]) return false; seen[id]=1; return true;
+    }).map(function(k){
+      var d=state.words[k].def.trim(), same=pos&&primaryPos(d)===pos;
+      return {key:k,def:d,score:(same?0:100)+Math.abs(d.length-correct.length)+Math.abs(k.length-key.length)};
+    }).sort(function(a,b){return a.score-b.score;});
+    var distractors=shuffleList(pool.slice(0,Math.min(14,pool.length))).slice(0,3);
+    return shuffleList([{key:key,def:correct,correct:true}].concat(distractors));
+  }
   function renderRecallCard(v, key){
-    var w = state.words[key];
-    var display = w.word || key;
-    var remain = queue.length - qIndex;
-    var pct = Math.round(qIndex / queue.length * 100);
-    var phonetic = phon(key);
+    var w=state.words[key], display=w.word||key, remain=queue.length-qIndex;
+    var pct=Math.round(qIndex/queue.length*100), phonetic=phon(key), choices=quizChoices(key), answered=false, grade=2;
+    var extra=(w.repetition===0&&!w.lastReview)?'<span class="tag">🎯 选择正确释义</span>':
+      (w.lapses>0?'<span class="tag">已错 '+w.lapses+' 次</span>':'<span class="tag">第 '+(w.repetition+1)+' 次复习</span>');
+    var options=choices.map(function(c,i){
+      return '<button class="quiz-option" data-choice="'+i+'"><span class="choice-key">'+(i+1)+'</span>'+formatDef(c.def)+'</button>';
+    }).join("");
 
-    var extra = "";
-    if(w.repetition === 0 && !w.lastReview) extra = '<span class="tag">新词</span>';
-    else if(w.lapses > 0) extra = '<span class="tag">已忘 '+w.lapses+' 次</span>';
-    else extra = '<span class="tag">第 '+ (w.repetition+1) +' 次复习</span>';
+    v.innerHTML='<div class="progress"><div class="bar"><i style="width:'+pct+'%"></i></div><span class="num">'+remain+' 词剩余</span></div>'+ 
+      '<div class="card">'+extra+'<div class="word">'+esc(display)+'</div>'+ 
+      '<button class="audio-btn" id="audioBtn" title="播放发音" aria-label="播放发音">🔊</button>'+ 
+      (phonetic?'<div class="phonetic">'+esc(phonetic)+'</div>':'')+
+      '<div class="quiz-options" id="quizOptions">'+options+'</div>'+ 
+      '<div class="quiz-feedback" id="quizFeedback"></div><button class="quiz-next" id="quizNext">继续</button></div>';
 
-    v.innerHTML =
-      '<div class="progress">' +
-        '<div class="bar"><i style="width:'+pct+'%"></i></div>' +
-        '<span class="num">'+remain+' 词剩余</span>' +
-      '</div>' +
-      '<div class="card">' +
-        extra +
-        '<div class="word">'+esc(display)+'</div>' +
-        '<button class="audio-btn" id="audioBtn" title="播放发音" aria-label="播放发音">🔊</button>' +
-        (phonetic ? '<div class="phonetic">'+esc(phonetic)+'</div>' : '') +
-        '<div class="def" id="defBox" style="visibility:hidden">' +
-          (w.def ? formatDef(w.def) : '<span class="hint">暂无释义</span>') +
-        '</div>' +
-        '<div class="hint" id="hintText">按 <span class="kbd">空格</span> 或点下方按钮显示释义</div>' +
-        '<button class="flip-btn" id="flipBtn">显示释义</button>' +
-        '<div class="grades" id="grades" style="display:none">' +
-          '<button class="grade g-again" data-g="0">忘记<small>按 1</small></button>' +
-          '<button class="grade g-hard" data-g="1">模糊<small>按 2</small></button>' +
-          '<button class="grade g-good" data-g="2">认识<small>按 3</small></button>' +
-        '</div>' +
-      '</div>';
-
-    function flip(){
-      window._flipped = true;
-      $("defBox").style.visibility = "visible";
-      $("hintText").style.display = "none";
-      $("flipBtn").style.display = "none";
-      $("grades").style.display = "grid";
+    function pick(index){
+      if(answered||index<0||index>=choices.length) return;
+      answered=true; grade=choices[index].correct?2:0;
+      var buttons=$("quizOptions").querySelectorAll(".quiz-option");
+      for(var i=0;i<buttons.length;i++){
+        buttons[i].disabled=true;
+        if(choices[i].correct) buttons[i].classList.add("correct");
+      }
+      if(grade===0){ buttons[index].classList.add("wrong"); $("quizFeedback").innerHTML='<span style="color:var(--again)">答错了，正确答案已标出</span>'; }
+      else $("quizFeedback").innerHTML='<span style="color:var(--good)">回答正确 ✓</span>';
+      $("quizNext").style.display="inline-block";
     }
-    $("flipBtn").onclick = flip;
-    $("audioBtn").onclick = function(){ playWord(key); };
-    var gs = $("grades").querySelectorAll(".grade");
-    for(var j=0;j<gs.length;j++){
-      gs[j].onclick = function(){
-        answer(key, parseInt(this.getAttribute("data-g"),10));
-      };
-    }
-    window._flipped = false;
-    window._curFlip = flip;
-    window._curKey = key;
+    function next(){ if(answered) answer(key,grade); }
+    $("audioBtn").onclick=function(){playWord(key);};
+    $("quizOptions").querySelectorAll(".quiz-option").forEach(function(b){b.onclick=function(){pick(parseInt(this.getAttribute("data-choice"),10));};});
+    $("quizNext").onclick=next;
+    window._quizPick=pick; window._quizNext=next; window._curKey=key; window._flipped=false; window._curFlip=null;
   }
 
   function renderSpellCard(v, key){
+    window._quizPick=null; window._quizNext=null;
     var w = state.words[key];
     var display = w.word || key;
     var target = display.toLowerCase();
@@ -1626,12 +1647,9 @@
         if(e.key === "Enter" && window._spellNext){ e.preventDefault(); window._spellNext(); }
         return;
       }
-      if(e.code === "Space"){
-        e.preventDefault();
-        if(window._curFlip && !window._flipped) window._curFlip();
-      } else if(e.key === "1" || e.key === "2" || e.key === "3"){
-        if(window._curKey && window._flipped) answer(window._curKey, parseInt(e.key,10)-1);
-      }
+      if(e.key>="1"&&e.key<="4"&&window._quizPick){ e.preventDefault(); window._quizPick(parseInt(e.key,10)-1); }
+      else if(e.key==="Enter"&&window._quizNext){ e.preventDefault(); window._quizNext(); }
+      else if(e.code==="Space"){ e.preventDefault(); if(window._curKey) playWord(window._curKey); }
     });
   }
 
