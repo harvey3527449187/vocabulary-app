@@ -74,6 +74,12 @@
   .quiz-option.wrong{border-color:var(--again);background:var(--again-soft);color:var(--again);}
   .quiz-option:disabled{cursor:default;transform:none;opacity:1;}
   .quiz-feedback{min-height:24px;font-size:15px;font-weight:700;margin-top:4px;}
+  .example-card{display:none;width:100%;margin-top:4px;padding:15px 17px;border:1px solid #dedcf8;
+    border-radius:15px;background:#f8f7ff;text-align:left;color:#343b50;line-height:1.65;font-size:15px;}
+  .example-card.show{display:block;animation:exampleIn .2s ease-out;}
+  .example-label{display:block;margin-bottom:3px;color:#655fdb;font-size:12px;font-weight:800;letter-spacing:.08em;}
+  .example-empty{color:var(--muted);font-style:normal;}
+  @keyframes exampleIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
   .study-nav{display:grid;grid-template-columns:120px 1fr 120px;align-items:center;gap:12px;margin-top:16px;}
   .nav-btn{border:1px solid rgba(255,255,255,.14);background:rgba(16,25,48,.72);color:#f7f9ff;
     min-height:46px;border-radius:14px;font-weight:750;cursor:pointer;backdrop-filter:blur(14px);}
@@ -248,7 +254,9 @@
   .close-btn{border:0;background:#f1f2f7;border-radius:50%;width:34px;height:34px;cursor:pointer;color:#687086;}
   .quick-input{width:100%;font-size:28px;font-weight:750;padding:18px 19px!important;border-radius:16px!important;margin-top:22px;}
   .quick-def{width:100%;padding:12px 14px!important;border-radius:12px!important;margin-top:10px;}
+  .quick-example{width:100%;padding:12px 14px!important;border-radius:12px!important;margin-top:10px;}
   .quick-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;color:var(--muted);font-size:12px;}
+  .quick-save{border:0;background:var(--accent);color:#fff;padding:10px 16px;border-radius:11px;font-size:13px;font-weight:750;cursor:pointer;}
   .quick-count{color:var(--accent);font-weight:750;}
   .quick-toast{min-height:22px;margin-top:10px;font-size:13px;color:var(--good);}
   @media (max-width:620px){
@@ -422,12 +430,13 @@
   <div class="modal" id="quickModal" role="dialog" aria-modal="true" aria-labelledby="quickTitle">
     <div class="modal-card">
       <div class="modal-head">
-        <div><h2 id="quickTitle">快速加词</h2><p>输入单词后按 Enter，自动保存并继续下一个。</p></div>
+        <div><h2 id="quickTitle">快速加词</h2><p>依次填写单词、释义和例句，按 Enter 前往下一项。</p></div>
         <button class="close-btn" id="quickClose" aria-label="关闭">✕</button>
       </div>
       <input class="quick-input" id="quickWord" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="输入英文单词…">
       <input class="quick-def" id="quickDef" type="text" placeholder="中文释义（可不填，稍后自动补全）">
-      <div class="quick-foot"><span><span class="kbd">Enter</span> 保存　<span class="kbd">Esc</span> 关闭</span><span class="quick-count" id="quickCount">本次已添加 0 个</span></div>
+      <input class="quick-example" id="quickExample" type="text" placeholder="英文例句（可不填，联网时会尝试补全）">
+      <div class="quick-foot"><span><span class="kbd">Enter</span> 下一项 / 保存　<span class="kbd">Esc</span> 关闭</span><button class="quick-save" id="quickSave">保存并继续</button><span class="quick-count" id="quickCount">本次已添加 0 个</span></div>
       <div class="quick-toast" id="quickToast"></div>
     </div>
   </div>
@@ -663,15 +672,14 @@
   var mode = "recall";
   var queue = [], qIndex = 0;
   var recallDeck = [];
-  var quizAdvanceTimer = null;
   var retryQueue = [];
   var studyTotal = 0;
   var session = {again:0, hard:0, good:0};
   var phoneticRepairKeys = [];
 
-  function defaultWord(def){
+  function defaultWord(def,example){
     return {def: def||"", repetition:0, interval:0, easiness:2.5, due: todayStr(),
-            lapses:0, added: todayStr(), lastReview: null, phonetic:"", audio:"", updatedAt:Date.now()};
+            lapses:0, added: todayStr(), lastReview: null, phonetic:"", audio:"", example:example||"", updatedAt:Date.now()};
   }
   function freshState(){
     return { words:{}, settings:{ newPerDay:20, autoEnrich:true }, learned:0, activity:{} };
@@ -693,6 +701,7 @@
         changed = true;
       }
       if(typeof w.audio !== "string") w.audio = "";
+      if(typeof w.example !== "string"){ w.example = ""; changed = true; }
       if((state.settings.definitionStyleVersion||0)<2 && w.lookupSource && /[｜|]/.test(w.def||"")){
         w.def = seedDefs[k] || compactStoredDef(w.def);
         changed = true;
@@ -710,9 +719,9 @@
       if(!line) continue;
       if(/^\d{1,2}-\d{1,2}$/.test(line)) continue;
       if(/^\d+$/.test(line)) continue;
-      var word, def = "";
+      var word, def = "", example = "";
       if(line.indexOf("\t") >= 0){
-        var p = line.split(/\t+/); word = p[0]; def = p.slice(1).join(" ").trim();
+        var p = line.split(/\t+/); word = p[0]; def = (p[1]||"").trim(); example = p.slice(2).join(" ").trim();
       } else if(/[,，]/.test(line)){
         var comma=line.search(/[,，]/); word=line.slice(0,comma); def=line.slice(comma+1).trim();
       } else {
@@ -721,7 +730,7 @@
       }
       word = word.replace(/[.。,\s]+$/,"").trim();
       if(!word || !/^[a-zA-Z][a-zA-Z\-' ]*$/.test(word)) continue;
-      out.push([word, def]);
+      out.push([word, def, example]);
     }
     return out;
   }
@@ -730,21 +739,22 @@
     var items = parseTxt(text);
     for(var i=0;i<items.length;i++){
       var key = items[i][0].toLowerCase();
-      state.words[key] = defaultWord(items[i][1]);
+      state.words[key] = defaultWord(items[i][1],items[i][2]);
       state.words[key].word = items[i][0];
     }
   }
   function importText(text){
     var items = parseTxt(text), added = 0, updated = 0, duplicates = 0, keys = [], queued = {};
     for(var i=0;i<items.length;i++){
-      var key = items[i][0].toLowerCase(), def = items[i][1];
+      var key = items[i][0].toLowerCase(), def = items[i][1], example=items[i][2]||"";
       if(state.words[key]){
         duplicates++;
         if(!state.words[key].def && def){ state.words[key].def = def; state.words[key].updatedAt=Date.now(); updated++; }
-        if((!state.words[key].phonetic || !state.words[key].def) && !queued[key]){ keys.push(key); queued[key]=1; }
+        if(!state.words[key].example && example){ state.words[key].example=example; state.words[key].updatedAt=Date.now(); updated++; }
+        if((!state.words[key].phonetic || !state.words[key].def || !state.words[key].example) && !queued[key]){ keys.push(key); queued[key]=1; }
         continue;
       }
-      state.words[key] = defaultWord(def);
+      state.words[key] = defaultWord(def,example);
       state.words[key].word = items[i][0];
       if(!queued[key]){ keys.push(key); queued[key]=1; }
       added++;
@@ -890,10 +900,13 @@
       var entry=data&&data[0]; if(!entry) throw new Error("not found");
       var phonetic=entry.phonetic||"", audio="";
       (entry.phonetics||[]).forEach(function(p){ if(!phonetic&&p.text) phonetic=p.text; if(!audio&&p.audio) audio=p.audio.indexOf("//")===0?"https:"+p.audio:p.audio; });
-      var senses=[];
-      (entry.meanings||[]).forEach(function(m){ (m.definitions||[]).slice(0,2).forEach(function(d){ if(d.definition) senses.push({pos:POS_ZH[m.partOfSpeech]||m.partOfSpeech||"",text:d.definition}); }); });
+      var senses=[], example="";
+      (entry.meanings||[]).forEach(function(m){ (m.definitions||[]).slice(0,2).forEach(function(d){
+        if(d.definition) senses.push({pos:POS_ZH[m.partOfSpeech]||m.partOfSpeech||"",text:d.definition});
+        if(!example&&d.example) example=cleanSenseText(d.example);
+      }); });
       senses=selectSenses(senses,2);
-      return {phonetic:cleanPhonetic(phonetic),audio:audio,english:senses[0]?senses[0].text:"",pos:senses[0]?senses[0].pos:"",senses:senses,source:"free-dictionary"};
+      return {phonetic:cleanPhonetic(phonetic),audio:audio,english:senses[0]?senses[0].text:"",pos:senses[0]?senses[0].pos:"",senses:senses,example:example,source:"free-dictionary"};
     });
   }
   function translateToChinese(text){
@@ -918,7 +931,7 @@
     var finish=function(senses){
       var def=sensesToDef(senses);
       if(!def && !cn.phonetic && !lex.phonetic) throw new Error("no usable result");
-      return {phonetic:cn.phonetic||lex.phonetic||"",audio:lex.audio||"",def:def,english:lex.english||"",source:[cn.source,lex.source].filter(Boolean).join("+")};
+      return {phonetic:cn.phonetic||lex.phonetic||"",audio:lex.audio||"",def:def,english:lex.english||"",example:lex.example||"",source:[cn.source,lex.source].filter(Boolean).join("+")};
     };
     if(cnSenses.length>=2) return Promise.resolve(finish(cnSenses));
     if(!lexSenses.length) return Promise.resolve(finish(cnSenses.length?cnSenses:[{pos:"",text:cn.zh||""}]));
@@ -947,12 +960,20 @@
         return completeLookup(parts[0],lex);
       }).catch(function(){return completeLookup(parts[0],parts[1]);});
       return lookupFreeDictionary(key).then(function(lex){return completeLookup(null,lex);});
+    }).then(function(info){
+      if(info.example) return info;
+      return lookupFreeDictionary(key).then(function(fd){
+        info.example=fd.example||"";
+        if(!info.audio&&fd.audio) info.audio=fd.audio;
+        if(!info.phonetic&&fd.phonetic) info.phonetic=fd.phonetic;
+        return info;
+      }).catch(function(){return info;});
     });
   }
   var enrichStatus={};
   function enrichWords(keys,force){
     keys = (keys || Object.keys(state.words)).filter(function(k){
-      var w=state.words[k]; return w && (force || !w.phonetic || !w.def);
+      var w=state.words[k]; return w && (force || !w.phonetic || !w.def || !w.example);
     });
     if(!keys.length){ setImportProgress(0,0,false); return Promise.resolve({ok:0,failed:0}); }
     var done=0, ok=0, failed=0;
@@ -965,6 +986,7 @@
           if(info.phonetic) w.phonetic=info.phonetic;
           if(info.audio) w.audio=info.audio;
           if((force||!w.def) && info.def) w.def=info.def;
+          if((force||!w.example) && info.example) w.example=info.example;
           w.lookupSource=info.source||""; w.updatedAt=Date.now(); enrichStatus[key]="success"; ok++;
         }).catch(function(){ enrichStatus[key]="failed"; failed++; }).then(function(){
           done++; setImportProgress(done,keys.length,true); save(); renderLibrary($("search").value);
@@ -1136,21 +1158,25 @@
     $("quickModal").classList.add("open"); setTimeout(function(){ $("quickWord").focus(); },0);
   }
   function closeQuickAdd(){
-    $("quickModal").classList.remove("open"); $("quickWord").value=""; $("quickDef").value="";
+    $("quickModal").classList.remove("open"); $("quickWord").value=""; $("quickDef").value=""; $("quickExample").value="";
     if(quickDirty){ startStudy(); renderLibrary($("search").value); }
   }
   function submitQuickWord(){
-    var display=$("quickWord").value.trim().replace(/[.。,\s]+$/g,""), def=$("quickDef").value.trim();
+    var display=$("quickWord").value.trim().replace(/[.。,\s]+$/g,""), def=$("quickDef").value.trim(), example=$("quickExample").value.trim();
     if(!display){ $("quickWord").focus(); return; }
     if(!/^[a-zA-Z][a-zA-Z\-' ]*$/.test(display)){ $("quickToast").textContent="请输入英文单词或短语"; return; }
     var key=display.toLowerCase(), existed=!!state.words[key];
-    if(!existed){ state.words[key]=defaultWord(def); state.words[key].word=display; quickAdded++; }
-    else if(def){ state.words[key].def=def; state.words[key].updatedAt=Date.now(); }
+    if(!existed){ state.words[key]=defaultWord(def,example); state.words[key].word=display; quickAdded++; }
+    else {
+      if(def) state.words[key].def=def;
+      if(example) state.words[key].example=example;
+      if(def||example) state.words[key].updatedAt=Date.now();
+    }
     save(); quickDirty=true;
     $("quickCount").textContent="本次已添加 "+quickAdded+" 个";
     $("quickToast").textContent=existed ? "“"+display+"”已在词库中，已跳到下一个" : "✓ 已加入 “"+display+"”，继续输入下一个";
-    $("quickWord").value=""; $("quickDef").value=""; $("quickWord").focus(); renderDashboard();
-    if(state.settings.autoEnrich && (!state.words[key].phonetic || !state.words[key].def)) enrichWords([key]).then(function(){ renderDashboard(); });
+    $("quickWord").value=""; $("quickDef").value=""; $("quickExample").value=""; $("quickWord").focus(); renderDashboard();
+    if(state.settings.autoEnrich && (!state.words[key].phonetic || !state.words[key].def || !state.words[key].example)) enrichWords([key]).then(function(){ renderDashboard(); });
   }
 
   /* ============ SM-2 复习 ============ */
@@ -1243,7 +1269,6 @@
   }
 
   function renderStudy(){
-    if(quizAdvanceTimer){ clearTimeout(quizAdvanceTimer); quizAdvanceTimer=null; }
     renderDashboard();
     var v = $("studyView");
     if(mode === "recall"){
@@ -1347,9 +1372,22 @@
     };
     function doJump(){ var n=parseInt(jump.value,10); if(n>=1&&n<=recallDeck.length) move(n-1); else {jump.value=qIndex+1;jump.focus();} }
     if(go) go.onclick=doJump;
-    if(jump) jump.onkeydown=function(e){if(e.key==="Enter"){e.preventDefault();doJump();}};
+    if(jump) jump.onkeydown=function(e){if(e.key==="Enter"){e.preventDefault();e.stopPropagation();doJump();}};
     window._quizPrev=function(){if(qIndex>0) move(qIndex-1);};
     window._quizNext=function(){if(next&&!next.disabled) next.click();};
+  }
+  function fallbackExample(word,def){
+    var pos=primaryPos(def), display=word||"this word";
+    if(pos==="adj.") return "The conditions became "+display+" during the day.";
+    if(pos==="v.") return "They decided to "+display+" it carefully.";
+    if(pos==="adv.") return "The situation changed "+display+" over time.";
+    if(pos==="n.") return "We learned about "+display+" in class.";
+    return "This sentence uses the word “"+display+"” in context.";
+  }
+  function examplePanelHtml(example,word,def){
+    var isTemplate=!example, sentence=example||fallbackExample(word,def);
+    return '<div class="example-card" id="exampleCard"><span class="example-label">'+(isTemplate?'TEMPLATE · 例句模板':'EXAMPLE · 例句')+'</span>'+
+      '<span'+(isTemplate?' class="example-empty"':'')+'>'+esc(sentence)+'</span></div>';
   }
   function renderRecallCard(v, card){
     var key=card.key, w=state.words[key], display=w.word||key, remain=recallDeck.filter(function(x){return !x.answered;}).length;
@@ -1365,7 +1403,7 @@
       '<button class="audio-btn" id="audioBtn" title="播放发音" aria-label="播放发音">🔊</button>'+ 
       (phonetic?'<div class="phonetic">'+esc(phonetic)+'</div>':'')+
       '<div class="quiz-options" id="quizOptions">'+options+'</div>'+ 
-      '<div class="quiz-feedback" id="quizFeedback"></div></div>'+recallNavHtml();
+      '<div class="quiz-feedback" id="quizFeedback"></div>'+examplePanelHtml(w.example,display,w.def)+'</div>'+recallNavHtml();
 
     function pick(index){
       if(card.answered||index<0||index>=choices.length) return;
@@ -1375,10 +1413,10 @@
       else session.good++;
       paintAnswer();
       var totalEl=$("jumpWord"); if(totalEl){ totalEl.max=recallDeck.length; var label=totalEl.nextElementSibling; if(label) label.textContent='/ '+recallDeck.length+' 个'; }
-      var nextBtn=$("nextWord"); if(nextBtn){ nextBtn.disabled=false; }
-      if(card.grade===2){
-        var cardIndex=qIndex;
-        quizAdvanceTimer=setTimeout(function(){ if(qIndex===cardIndex){ qIndex++; renderStudy(); } },650);
+      var nextBtn=$("nextWord");
+      if(nextBtn){
+        nextBtn.disabled=false;
+        if(card.grade===2) nextBtn.textContent=(qIndex===recallDeck.length-1?'完成':'下一个')+' ↵';
       }
     }
     function paintAnswer(){
@@ -1389,7 +1427,10 @@
         if(choices[i].correct) buttons[i].classList.add("correct");
       }
       if(card.grade===0){ if(buttons[card.selected]) buttons[card.selected].classList.add("wrong"); $("quizFeedback").innerHTML='<span style="color:var(--again)">答错了，已加入本轮末尾再练一次</span>'; }
-      else $("quizFeedback").innerHTML='<span style="color:var(--good)">回答正确 ✓</span>';
+      else {
+        $("quizFeedback").innerHTML='<span style="color:var(--good)">回答正确 ✓</span>';
+        var exampleCard=$("exampleCard"); if(exampleCard) exampleCard.classList.add("show");
+      }
     }
     $("audioBtn").onclick=function(){playWord(key);};
     $("quizOptions").querySelectorAll(".quiz-option").forEach(function(b){b.onclick=function(){pick(parseInt(this.getAttribute("data-choice"),10));};});
@@ -1452,11 +1493,12 @@
     function phInline(){
       return phonetic ? ' <span style="color:var(--muted)">'+esc(phonetic)+'</span>' : '';
     }
-    function showResult(html){
+    function showResult(html,showExample){
       var ph = $("spellPhon");
       if(ph) ph.style.visibility = "visible";
       var r = $("spellResult");
-      r.innerHTML = html + ' <button class="btn" id="nextBtn">下一个 ↵</button>';
+      r.innerHTML = html + (showExample?examplePanelHtml(w.example,display,w.def):"") + ' <button class="btn" id="nextBtn">下一个 ↵</button>';
+      var ex=$("exampleCard"); if(ex&&showExample) ex.classList.add("show");
       $("nextBtn").onclick = next;
       window._spellNext = next;
     }
@@ -1479,7 +1521,7 @@
         retryQueue.push(key);
         resetBoxes();
         input.value = "";
-        $("spellResult").innerHTML = '<span style="color:var(--again)">❌ 拼错了，再拼一次</span>';
+        $("spellResult").innerHTML = '<span style="color:var(--again)">❌ 第一次拼错，还有 1 次机会，请再拼一次</span>';
         input.focus();
         return;
       }
@@ -1487,12 +1529,12 @@
       if(correct && !missed){
         var g = usedHint ? 1 : 2;
         review(key, g);
-        if(usedHint){ session.hard++; showResult('<span style="color:var(--hard)">✅ 正确（用了音标提示）</span>'+phInline()); }
-        else { session.good++; showResult('<span style="color:var(--good)">✅ 拼写正确！</span>'+phInline()); }
+        if(usedHint){ session.hard++; showResult('<span style="color:var(--hard)">✅ 正确（用了音标提示）</span>'+phInline(),true); }
+        else { session.good++; showResult('<span style="color:var(--good)">✅ 拼写正确！</span>'+phInline(),true); }
       } else if(correct && missed){
-        showResult('<span style="color:var(--good)">✅ 这次拼对了，但首次拼错已记为“忘记”，稍后会再复习一次</span>'+phInline());
+        showResult('<span style="color:var(--good)">✅ 第二次拼对了，稍后还会再复习一次</span>'+phInline(),true);
       } else {
-        showResult('<span style="color:var(--again)">❌ 正确答案：<b>'+esc(display)+'</b>'+phInline()+' '+esc(w.def||'')+'</span>');
+        showResult('<span style="color:var(--again)">❌ 正确答案：<b>'+esc(display)+'</b>'+phInline()+' '+esc(w.def||'')+'</span>',false);
       }
     }
     function giveUp(){
@@ -1501,7 +1543,7 @@
       for(var i=0;i<bs.length;i++){ bs[i].textContent = t[i]; bs[i].classList.add('wrong'); }
       finish();
       if(!missed){ review(key, 0); session.again++; retryQueue.push(key); }
-      showResult('<span style="color:var(--again)">正确答案：<b>'+esc(display)+'</b>'+phInline()+' '+esc(w.def||'')+'</span>');
+      showResult('<span style="color:var(--again)">正确答案：<b>'+esc(display)+'</b>'+phInline()+' '+esc(w.def||'')+'</span>',false);
     }
 
     input.oninput = function(){ sync(); if(input.value.length >= len) judge(input.value); };
@@ -1578,7 +1620,8 @@
   function editWord(key){
     var w=state.words[key]; if(!w) return;
     var next=prompt("修改释义：",w.def||""); if(next===null) return;
-    w.def=next.trim(); w.updatedAt=Date.now(); save(); renderLibrary($("search").value); renderStudy();
+    var nextExample=prompt("修改英文例句（可留空）：",w.example||""); if(nextExample===null) return;
+    w.def=next.trim(); w.example=nextExample.trim(); w.updatedAt=Date.now(); save(); renderLibrary($("search").value); renderStudy();
   }
 
   /* ============ 文件夹授权 / 自动读取 ============ */
@@ -1636,8 +1679,10 @@
     $("quickAddBtn").onclick=openQuickAdd;
     $("quickClose").onclick=closeQuickAdd;
     $("quickModal").onclick=function(e){ if(e.target===$("quickModal")) closeQuickAdd(); };
-    $("quickWord").onkeydown=function(e){ if(e.key==="Enter"){ e.preventDefault(); submitQuickWord(); } };
-    $("quickDef").onkeydown=function(e){ if(e.key==="Enter"){ e.preventDefault(); submitQuickWord(); } };
+    $("quickWord").onkeydown=function(e){ if(e.key==="Enter"){ e.preventDefault(); $("quickDef").focus(); } };
+    $("quickDef").onkeydown=function(e){ if(e.key==="Enter"){ e.preventDefault(); $("quickExample").focus(); } };
+    $("quickExample").onkeydown=function(e){ if(e.key==="Enter"){ e.preventDefault(); submitQuickWord(); } };
+    $("quickSave").onclick=submitQuickWord;
 
     $("makeSyncId").onclick=function(){
       $("syncId").value=(crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==="x"?r:(r&3|8);return v.toString(16);}));
@@ -1753,7 +1798,9 @@
         if(e.key === "Enter" && window._spellNext){ e.preventDefault(); window._spellNext(); }
         return;
       }
+      if(e.target&&e.target.id==="jumpWord") return;
       if(e.key>="1"&&e.key<="4"&&window._quizPick){ e.preventDefault(); window._quizPick(parseInt(e.key,10)-1); }
+      else if(e.key==="Enter"&&window._quizNext){ e.preventDefault(); window._quizNext(); }
       else if(e.key==="ArrowLeft"&&window._quizPrev){ e.preventDefault(); window._quizPrev(); }
       else if(e.key==="ArrowRight"&&window._quizNext){ e.preventDefault(); window._quizNext(); }
       else if(e.code==="Space"){ e.preventDefault(); if(window._curKey) playWord(window._curKey); }
