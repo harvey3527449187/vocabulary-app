@@ -330,7 +330,7 @@
 </head>
 <body>
   <div class="topbar">
-    <div class="brand-wrap"><div class="brand-mark">Aa</div><div><div class="brand">拾词</div><div class="brand-sub">每天一点，记得更久</div></div></div>
+    <div class="brand-wrap"><div class="brand-mark">Aa</div><div><div class="brand">拾词</div><div class="brand-sub">每天一点，记得更久 · v13</div></div></div>
     <div class="header-actions">
       <div class="tabs">
         <button class="tab active" data-panel="study">学习</button>
@@ -346,7 +346,7 @@
     <section class="panel active" id="study">
       <div class="dashboard" id="dashboard"></div>
       <div class="mode-switch">
-        <button class="mode-btn active" data-mode="recall">🎯 四选一认词</button>
+        <button class="mode-btn active" data-mode="recall">🎯 看词选释义 · 四选一</button>
         <button class="mode-btn" data-mode="spell">✏️ 拼写默写</button>
       </div>
       <div id="studyView"></div>
@@ -1339,6 +1339,17 @@
     for(var i=list.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)), t=list[i]; list[i]=list[j]; list[j]=t; }
     return list;
   }
+  function wordSimilarity(a,b){
+    a=String(a).toLowerCase(); b=String(b).toLowerCase();
+    var row=[], next=[];
+    for(var j=0;j<=b.length;j++) row[j]=j;
+    for(var i=1;i<=a.length;i++){
+      next=[i];
+      for(var k=1;k<=b.length;k++) next[k]=Math.min(next[k-1]+1,row[k]+1,row[k-1]+(a[i-1]===b[k-1]?0:1));
+      row=next;
+    }
+    return 1-row[b.length]/Math.max(a.length,b.length,1);
+  }
   function quizChoices(key){
     var correct=(state.words[key].def||"暂无释义").trim(), pos=primaryPos(correct), seen={};
     seen[correct.replace(/\s+/g,"").toLowerCase()]=1;
@@ -1347,9 +1358,11 @@
       if(k===key||!d||seen[id]) return false; seen[id]=1; return true;
     }).map(function(k){
       var d=state.words[k].def.trim(), same=pos&&primaryPos(d)===pos;
-      return {key:k,def:d,score:(same?0:100)+Math.abs(d.length-correct.length)+Math.abs(k.length-key.length)};
+      return {key:k,def:d,score:(same?0:100)+(1-wordSimilarity(key,k))*24+Math.abs(d.length-correct.length)*.4};
     }).sort(function(a,b){return a.score-b.score;});
-    var distractors=shuffleList(pool.slice(0,Math.min(14,pool.length))).slice(0,3);
+    var samePosPool=pool.filter(function(item){return pos&&primaryPos(item.def)===pos;});
+    var candidates=samePosPool.length>=3?samePosPool:pool;
+    var distractors=shuffleList(candidates.slice(0,Math.min(6,candidates.length))).slice(0,3);
     return shuffleList([{key:key,def:correct,correct:true}].concat(distractors));
   }
   function recallNavHtml(){
@@ -1871,7 +1884,7 @@
 
   init();
   if("serviceWorker" in navigator && location.protocol.indexOf("http")===0){
-    navigator.serviceWorker.register("./sw.js").catch(function(){});
+    navigator.serviceWorker.register("./sw.js",{updateViaCache:"none"}).then(function(reg){reg.update().catch(function(){});}).catch(function(){});
   }
 })();
 </script>
